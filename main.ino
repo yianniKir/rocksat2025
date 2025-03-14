@@ -4,7 +4,9 @@
  * 
  * By John (Yianni) Kiritsis
  * Created: 12/30/2024
- * Last Edited: 2/11/2025 Rev 1
+ * Last Edited: 3/13/2025 Rev 1
+
+ 21 Watts
  */
 
 
@@ -13,13 +15,16 @@
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#include <SPI.h>
+#include <SD.h>
 
 //Pin Defines
-#define ESC_PIN 4
+#define ESC_PIN 10
 #define LASER_INTERRUPT_PIN 3
+#define CHIP_SELECT 5
 
 //Other Defines
-#define ESC_MIN 1000
+#define ESC_MIN 1100
 #define ESC_MAX 2000
 
 #define FX29_I2C_ADDRESS  0x28
@@ -28,6 +33,8 @@
 
 //Global Variables and Structures
 Servo ESC;
+/*File logFile;*/
+File logFile;
 
 Adafruit_MPU6050 MPU;
 unsigned long lastAccelerometerCalculationTime = 0;
@@ -43,6 +50,11 @@ unsigned long lastRPMCalculationTime = 0;
 float rpm = 0;
 
 unsigned long lastPrintTime = 0;
+
+
+unsigned long lastFileWriteTime = 0;
+unsigned long lastSaveTime = 0;
+
 
 //Functions
 uint16_t readRawData();
@@ -60,6 +72,7 @@ void setup() {
 
   //Attatch ESC and set PWM pulse from 1000 to 2000mus
   ESC.attach(ESC_PIN, ESC_MIN, ESC_MAX); 
+  delay(1000);
   ESC.writeMicroseconds(ESC_MIN);
   if(useSerial) Serial.print("SETUP: (PASS) ESC Intialized");
 
@@ -90,6 +103,7 @@ void setup() {
   
   //Calculate Tare
   fx29Tare = calibrateFX29();
+
   if(fx29Tare < 0) fx29Tare = DEFAULT_TARE;
 
   if(useSerial){
@@ -98,8 +112,25 @@ void setup() {
     Serial.print("\n");
   }
 
+//*****SD CARD
+
+  /*if(useSerial) Serial.print("Initializing SD Card\n");
+  SD.begin();
+
+  if(useSerial)Serial.print("SD Card initialized\n");
+  logFile = SD.open("log.txt", FILE_WRITE);
+  */
+  
+  if(useSerial) Serial.print("Initializing SD Card\n");
+  SD.begin(CHIP_SELECT);
+
+  if(useSerial)Serial.print("SD Card initialized\n");
+  logFile = SD.open("logf.txt", FILE_WRITE);
+  
+
   if(useSerial) Serial.print("*** END SETUP ***\n\n\n");
 
+  if(useSerial) Serial.print("*** END SETUP ***\n\n\n");
 }
 
 unsigned long lastMotorStepTime = 0;
@@ -113,17 +144,21 @@ void loop() {
   unsigned long timeSinceForceCalculation = currentTime - lastForceCalculationTime;
   unsigned long timeSinceAccelerometerCalculation = currentTime - lastAccelerometerCalculationTime;
   unsigned long timeSincePrint = currentTime - lastPrintTime;
-  
   unsigned long timeSinceMotorStep = currentTime - lastMotorStepTime;
+    unsigned long timeSinceFileWrite = currentTime - lastFileWriteTime;
+  unsigned long timeSinceSave = currentTime - lastSaveTime;
+
 
   //TEMPORARY MOTOR STEP
   if(timeSinceMotorStep >= 2000){
-    if(throttle <= 1900){
-      ESC.writeMicroseconds(throttle);
-      throttle+=50;
+    //Motor starts spinning around 1180
+    if(throttle <= 1200){
+      throttle+=25;
     }
+      ESC.writeMicroseconds(throttle);
      lastMotorStepTime = currentTime; 
   }
+      ESC.writeMicroseconds(throttle);
 
   //RPM Computation every 1 second
   if(timeSinceRPMCalculation >= 1000){
@@ -171,10 +206,60 @@ void loop() {
     MPU.getEvent(&a, &g, &temp);
   }
 
-  //Print every 0.5 seconds
+ //Write to SD card every 1 second
+  if(timeSinceFileWrite >= 500){
+    // Open the log file
+    
+    // If the file is available, write to it
+    if (logFile) {
+      //Data string format: rpm,force, accelerationx,accelerationy,accelerationz,gyrox,gyroy,gyroz
+      logFile.print(rpm);
+      logFile.print(',');
+      logFile.print(force);
+      logFile.print(',');
+      logFile.print(a.acceleration.x);
+      logFile.print(',');
+      logFile.print(a.acceleration.y);
+      logFile.print(',');
+      logFile.print(a.acceleration.z);
+      logFile.print(',');
+      logFile.print(g.gyro.x);
+      logFile.print(',');
+      logFile.print(g.gyro.y);
+      logFile.print(',');
+      logFile.print(g.gyro.z); // Fixed typo: was g.gyro.y
+      logFile.println();
+      
+      
+      // Optional: Also print to Serial for debugging
+      if(useSerial) {
+        Serial.println("Data written to SD card");
+      }
+    } else {
+      // If the file isn't open, pop up an error
+      if(useSerial) {
+       // Serial.println("Error opening log.txt");
+      }
+    }
+
+    lastFileWriteTime = currentTime;
+  }
+
+  //save SD card every 10 seconds
+  if(timeSinceSave >= 10000){
+    logFile.close();
+    
+    delay(10);
+
+    logFile = SD.open("logf.txt", FILE_WRITE);
+    lastSaveTime = currentTime;
+  }
+  //Print every 1 seconds
   if(timeSincePrint >= 1000 && useSerial){
     Serial.println("*** DATA CHUNK ***");
     
+    Serial.print("PWM: ");
+    Serial.println(throttle);
     Serial.print("RPM: ");
     Serial.println(rpm);
 
@@ -200,24 +285,23 @@ void loop() {
   }
   
 }
-
 uint16_t readRawData() {
-    uint8_t data[2];
-
-    Wire.beginTransmission(FX29_I2C_ADDRESS);
-    Wire.endTransmission();
-
     Wire.requestFrom(FX29_I2C_ADDRESS, 2);
+    
     if (Wire.available() == 2) {
-        data[0] = Wire.read();  // Read first byte
-        data[1] = Wire.read();  // Read second byte
+        uint8_t byte1 = Wire.read();
+        uint8_t byte2 = Wire.read();
 
-        // Mask status bits, keeping only the 14-bit data
-        return ((data[0] & 0x3F) << 8) | data[1];
+        uint8_t statusBits = (byte1 & 0xC0) >> 6;  // Extract status bits (upper 2 bits)
+        uint16_t rawValue = ((byte1 & 0x3F) << 8) | byte2;  // Keep only data bits
+
+        return rawValue;
     } else {
-        return 0; 
+        Serial.println("ERROR: No data received.");
+        return 0;
     }
 }
+
 
 float calibrateFX29() {
     float sum = 0;
@@ -227,7 +311,7 @@ float calibrateFX29() {
         uint16_t reading = readRawData();
         if (reading == 0) {
             if(useSerial) Serial.print("Error: No valid data received during calibration.\n");
-         
+              Serial.println("\n\n\n\n\n\n");
             return -1;  //Error
         }
         sum += reading;
@@ -240,3 +324,4 @@ float calibrateFX29() {
 void countPulse() {
     pulseCount++;
 }
+
